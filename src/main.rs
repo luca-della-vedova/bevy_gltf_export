@@ -113,7 +113,7 @@ fn image_getter(id: &Handle<Image>) -> Option<Image> {
     Some(Image::new_fill(
         extent,
         TextureDimension::D2,
-        &[0, 255, 0, 0],
+        &[0, 0, 255, 255],
         TextureFormat::Rgba8Unorm,
     ))
 }
@@ -124,42 +124,53 @@ fn to_gltf_material(
 ) -> (json::Material, Vec<json::Texture>, Vec<json::Image>) {
     let mut textures = vec![];
     let mut images = vec![];
+    let mut material = json::Material {
+        pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+            base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
+            // TODO(luca) other properties here
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
     // TODO(luca) implement samplers
     if let Some(base_color_texture) = &mat.base_color_texture {
         let image = image_getter(base_color_texture).unwrap();
-        let texture = json::Index::<json::Image>::new(0);
-        /*
-        let buffer_view_index = buffer_views.len() as u32;
-        buffer_views.push(json::buffer::View {
-            buffer: json::Index::new(0),
-            byte_length: buffer_length,
-            byte_offset: Some(buffer.byte_length),
-            byte_stride: Some(mem::size_of::<u32>() as u32),
-            extensions: Default::default(),
-            extras: Default::default(),
-            name: None,
-            target: Some(Valid(json::buffer::Target::ArrayBuffer)),
-        });
+        let texture_idx = json::Index::<json::Image>::new(0);
+        let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
+            image::ImageBuffer::from_raw(image.width(), image.height(), image.data).unwrap();
+        let mut bytes: Vec<u8> = Vec::new();
+        image_buffer
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+
+        let view_idx = buffers.push_buffer(bytes);
         images.push(json::Image {
-            data: Some(image.data),
-            //mime_type: Some(),
-            ..Default::default()
+            buffer_view: Some(json::Index::new(view_idx)),
+            mime_type: None,
+            uri: None,
+            extensions: None,
+            name: None,
+            extras: Default::default(),
         });
-        textures.push(texture);
-        */
+        textures.push(json::Texture {
+            sampler: None,
+            source: texture_idx,
+            extensions: None,
+            name: None,
+            extras: Default::default(),
+        });
+        material.pbr_metallic_roughness.base_color_texture = Some(json::texture::Info {
+            index: json::Index::new(0),
+            tex_coord: 0,
+            extensions: None,
+            extras: Default::default(),
+        });
     }
-    (
-        json::Material {
-            pbr_metallic_roughness: json::material::PbrMetallicRoughness {
-                base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
-                // TODO(luca) other properties here
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        textures,
-        images,
-    )
+    (material, textures, images)
 }
 
 fn get_indices_data(
@@ -230,7 +241,7 @@ fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
                 1, 3, 2,
             ]))),
         StandardMaterial {
-            base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+            base_color: Color::rgba(1.0, 1.0, 1.0, 1.0),
             base_color_texture: Some(Handle::default()),
             ..Default::default()
         },
