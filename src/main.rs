@@ -3,20 +3,10 @@ use bevy::render::mesh::Indices;
 use bevy::render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat};
 use gltf_json as json;
 
-use std::{fs, mem};
+use std::mem;
 
 use json::validation::Checked::Valid;
 use std::borrow::Cow;
-use std::io::Write;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Output {
-    /// Output standard glTF.
-    Standard,
-
-    /// Output binary glTF.
-    Binary,
-}
 
 #[derive(Debug)]
 struct BuffersWrapper {
@@ -27,18 +17,14 @@ struct BuffersWrapper {
 }
 
 impl BuffersWrapper {
-    fn new(output: &Output) -> Self {
+    fn new() -> Self {
         Self {
             buffer: json::Buffer {
                 byte_length: 0,
                 extensions: Default::default(),
                 extras: Default::default(),
                 name: None,
-                uri: if *output == Output::Standard {
-                    Some("buffer0.bin".into())
-                } else {
-                    None
-                },
+                uri: None,
             },
             buffer_views: vec![],
             accessors: vec![],
@@ -46,8 +32,7 @@ impl BuffersWrapper {
         }
     }
 
-    fn push_buffer<T>(&mut self, data: Vec<T>) -> u32 {
-        let last_view_idx = self.buffer_views.len() as u32;
+    fn push_buffer<T>(&mut self, data: Vec<T>) -> json::Index<json::buffer::View> {
         let bytes = to_padded_byte_vector(data);
         self.buffer_views.push(json::buffer::View {
             buffer: json::Index::new(0),
@@ -61,13 +46,12 @@ impl BuffersWrapper {
         });
         self.data.extend(bytes);
         self.buffer.byte_length = self.data.len() as u32;
-        last_view_idx
+        json::Index::new((self.buffer_views.len() as u32) - 1)
     }
 
     fn push_accessor(&mut self, accessor: json::Accessor) -> json::Index<json::Accessor> {
-        let last_accessor_idx = self.accessors.len() as u32;
         self.accessors.push(accessor);
-        json::Index::<json::Accessor>::new(last_accessor_idx)
+        json::Index::<json::Accessor>::new(self.accessors.len() as u32 - 1)
     }
 
     fn build(
@@ -133,7 +117,7 @@ fn to_gltf_material(
         ..Default::default()
     };
 
-    // TODO(luca) implement samplers
+    // TODO(luca) implement samplers and other types of textures
     if let Some(base_color_texture) = &mat.base_color_texture {
         let image = image_getter(base_color_texture).unwrap();
         let texture_idx = json::Index::<json::Image>::new(0);
@@ -149,7 +133,7 @@ fn to_gltf_material(
 
         let view_idx = buffers.push_buffer(bytes);
         images.push(json::Image {
-            buffer_view: Some(json::Index::new(view_idx)),
+            buffer_view: Some(view_idx),
             mime_type: None,
             uri: None,
             extensions: None,
@@ -185,7 +169,7 @@ fn get_indices_data(
     let view_idx = buffers.push_buffer(indices);
     // TODO(luca) Indexes can also be u8 / u16
     let accessor_idx = buffers.push_accessor(json::Accessor {
-        buffer_view: Some(json::Index::new(view_idx)),
+        buffer_view: Some(view_idx),
         byte_offset: None,
         count,
         component_type: Valid(json::accessor::GenericComponentType(
@@ -256,9 +240,8 @@ struct Vertex {
     uv: [f32; 2],
 }
 
-fn export_mesh(output: Output) -> Result<(), ()> {
-    let (mesh, material) = create_bevy_sample_mesh();
-    let mut buffers = BuffersWrapper::new(&output);
+fn export_mesh(mesh: Mesh, material: StandardMaterial, filename: &str) -> Result<(), ()> {
+    let mut buffers = BuffersWrapper::new();
 
     let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -304,7 +287,7 @@ fn export_mesh(output: Output) -> Result<(), ()> {
     let num_vertices = vertices.len() as u32;
     let view_idx = buffers.push_buffer(vertices);
     let positions = json::Accessor {
-        buffer_view: Some(json::Index::new(view_idx)),
+        buffer_view: Some(view_idx),
         byte_offset: Some(0),
         count: num_vertices,
         component_type: Valid(json::accessor::GenericComponentType(
@@ -320,7 +303,7 @@ fn export_mesh(output: Output) -> Result<(), ()> {
         sparse: None,
     };
     let normals = json::Accessor {
-        buffer_view: Some(json::Index::new(view_idx)),
+        buffer_view: Some(view_idx),
         byte_offset: Some((3 * mem::size_of::<f32>()) as u32),
         count: num_vertices,
         component_type: Valid(json::accessor::GenericComponentType(
@@ -336,7 +319,7 @@ fn export_mesh(output: Output) -> Result<(), ()> {
         sparse: None,
     };
     let uvs = json::Accessor {
-        buffer_view: Some(json::Index::new(view_idx)),
+        buffer_view: Some(view_idx),
         byte_offset: Some((6 * mem::size_of::<f32>()) as u32),
         count: num_vertices,
         component_type: Valid(json::accessor::GenericComponentType(
@@ -415,39 +398,31 @@ fn export_mesh(output: Output) -> Result<(), ()> {
         ..Default::default()
     };
 
-    match output {
-        Output::Standard => {
-            let _ = fs::create_dir("triangle");
-
-            let writer = fs::File::create("triangle/triangle.gltf").expect("I/O error");
-            json::serialize::to_writer_pretty(writer, &root).expect("Serialization error");
-
-            let mut writer = fs::File::create("triangle/buffer0.bin").expect("I/O error");
-            writer.write_all(&buffer_bytes).expect("I/O error");
-        }
-        Output::Binary => {
-            let json_string = json::serialize::to_string(&root).expect("Serialization error");
-            let mut json_offset = json_string.len() as u32;
-            let buf_length = buffer_bytes.len() as u32;
-            align_to_multiple_of_four(&mut json_offset);
-            let glb = gltf::binary::Glb {
-                header: gltf::binary::Header {
-                    magic: *b"glTF",
-                    version: 2,
-                    length: json_offset + buf_length,
-                },
-                bin: Some(Cow::Owned(buffer_bytes)),
-                json: Cow::Owned(json_string.into_bytes()),
-            };
-            let writer = std::fs::File::create("triangle.glb").expect("I/O error");
-            glb.to_writer(writer).expect("glTF binary output error");
-        }
-    }
+    let json_string = json::serialize::to_string(&root).expect("Serialization error");
+    let mut json_offset = json_string.len() as u32;
+    let buf_length = buffer_bytes.len() as u32;
+    align_to_multiple_of_four(&mut json_offset);
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header {
+            magic: *b"glTF",
+            version: 2,
+            length: json_offset + buf_length,
+        },
+        bin: Some(Cow::Owned(buffer_bytes)),
+        json: Cow::Owned(json_string.into_bytes()),
+    };
+    let writer = std::fs::File::create(filename).expect("I/O error");
+    glb.to_writer(writer).expect("glTF binary output error");
 
     Ok(())
 }
 
+fn export_test_mesh(filename: &str) -> Result<(), ()> {
+    let (mesh, material) = create_bevy_sample_mesh();
+    export_mesh(mesh, material, filename)
+}
+
 fn main() {
     println!("Hello, world!");
-    export_mesh(Output::Binary).unwrap();
+    export_test_mesh("triangle.glb").unwrap();
 }
