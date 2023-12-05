@@ -22,6 +22,7 @@ pub enum MeshExportError {
     MissingVertexNormal,
     TextureNotFound,
     ImageConversionFailed,
+    SerializationError,
 }
 
 impl BuffersWrapper {
@@ -376,7 +377,8 @@ pub fn export_mesh(
         ..Default::default()
     };
 
-    let json_string = json::serialize::to_string(&root).expect("Serialization error");
+    let json_string =
+        json::serialize::to_string(&root).or(Err(MeshExportError::SerializationError))?;
     let mut json_offset = json_string.len() as u32;
     let buf_length = buffer_bytes.len() as u32;
     align_to_multiple_of_four(&mut json_offset);
@@ -389,5 +391,5 @@ pub fn export_mesh(
         bin: Some(Cow::Owned(buffer_bytes)),
         json: Cow::Owned(json_string.into_bytes()),
     };
-    Ok(glb.to_vec().expect("glTF binary output error"))
+    glb.to_vec().or(Err(MeshExportError::SerializationError))
 }
