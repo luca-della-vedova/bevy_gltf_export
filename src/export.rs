@@ -1,4 +1,6 @@
-use bevy::prelude::*;
+use bevy_asset::Handle;
+use bevy_pbr::StandardMaterial;
+use bevy_render::prelude::*;
 use gltf_json as json;
 
 use std::mem;
@@ -114,8 +116,9 @@ fn to_gltf_material(
     if let Some(base_color_texture) = &mat.base_color_texture {
         let image = image_getter(base_color_texture).ok_or(MeshExportError::TextureNotFound)?;
         let texture_idx = json::Index::<json::Image>::new(0);
+        let image_size = image.size();
         let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
-            image::ImageBuffer::from_raw(image.width(), image.height(), image.data)
+            image::ImageBuffer::from_raw(image_size[0] as u32, image_size[1] as u32, image.data)
                 .ok_or(MeshExportError::ImageConversionFailed)?;
         let mut bytes: Vec<u8> = Vec::new();
         image_buffer
@@ -162,12 +165,12 @@ fn get_vertices_data(
     buffers: &mut BuffersWrapper,
     mesh: &Mesh,
 ) -> Result<VerticesData, MeshExportError> {
-    let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) =
+    let Some(bevy_render::mesh::VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute(Mesh::ATTRIBUTE_POSITION)
     else {
         return Err(MeshExportError::MissingVertexPosition);
     };
-    let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(normals)) =
+    let Some(bevy_render::mesh::VertexAttributeValues::Float32x3(normals)) =
         mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
     else {
         return Err(MeshExportError::MissingVertexNormal);
@@ -183,7 +186,7 @@ fn get_vertices_data(
         })
         .collect::<Vec<_>>();
 
-    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x2(uvs)) =
+    if let Some(bevy_render::mesh::VertexAttributeValues::Float32x2(uvs)) =
         mesh.attribute(Mesh::ATTRIBUTE_UV_0)
     {
         for (idx, uv) in uvs.iter().enumerate() {

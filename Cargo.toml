@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# bevy TODO see if we can strip these
-bevy = "0.12.0"
+bevy_asset = "0.11.0"
+bevy_pbr = "0.11.0"
+bevy_render = "0.11.0"
 
 # Note, keep this in track with the upstream bevy_gltf dependency
 gltf = { version = "1.3.0", default-features = false, features = [
