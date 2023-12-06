@@ -5,7 +5,7 @@ use bevy_render::prelude::*;
 use bevy_render::render_resource::PrimitiveTopology;
 use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use bevy_gltf_export::{export_mesh, MeshExportError};
+use bevy_gltf_export::{export_mesh, CompressGltfOptions, MeshExportError};
 
 fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
     // Create a new mesh using a triangle list topology, where each set of 3 vertices composes a triangle.
@@ -53,7 +53,53 @@ fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
     )
 }
 
-// Dummy imag getter that returns a solid blue texture
+fn create_bevy_sample_mesh2() -> (Mesh, StandardMaterial) {
+    // Create a new mesh using a triangle list topology, where each set of 3 vertices composes a triangle.
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    // Add 4 vertices, each with its own position attribute (coordinate in
+    // 3D space), for each of the corners of the parallelogram.
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            [10.0, 10.0, 10.0],
+            [11.0, 12.0, 10.0],
+            [12.0, 12.0, 10.0],
+            [11.0, 10.0, 10.0],
+        ],
+    );
+    // Assign a UV coordinate to each vertex.
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0, 1.0], [0.5, 0.0], [1.0, 0.0], [0.5, 1.0]],
+    );
+    // Assign normals (everything points outwards)
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vec![
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ],
+    );
+    // After defining all the vertices and their attributes, build each triangle using the
+    // indices of the vertices that make it up in a counter-clockwise order.
+    mesh.set_indices(Some(Indices::U32(vec![
+        // First triangle
+        0, 3, 1, // Second triangle
+        1, 3, 2,
+    ])));
+    (
+        mesh,
+        StandardMaterial {
+            base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+            base_color_texture: Some(Handle::default()),
+            ..Default::default()
+        },
+    )
+}
+
+// Dummy image getter that returns a solid blue texture
 fn sample_image_getter(_id: &Handle<Image>) -> Option<Image> {
     let extent = Extent3d {
         width: 512,
@@ -70,11 +116,16 @@ fn sample_image_getter(_id: &Handle<Image>) -> Option<Image> {
 
 fn export_test_mesh() -> Result<Vec<u8>, MeshExportError> {
     let (mesh, material) = create_bevy_sample_mesh();
-    export_mesh(mesh, material, sample_image_getter)
+    let (mesh2, material2) = create_bevy_sample_mesh2();
+    let (mesh3, material3) = create_bevy_sample_mesh2();
+    let res = export_mesh(mesh, material, None, sample_image_getter)?;
+    let res2 = export_mesh(mesh2, material2, None, sample_image_getter)?;
+    let res3 = export_mesh(mesh3, material3, None, sample_image_getter)?;
+    let res = res.combine_with([res2, res3], CompressGltfOptions::maximum());
+    res.to_bytes()
 }
 
 fn main() {
-    println!("Hello, world!");
     let vec = export_test_mesh().unwrap();
     std::fs::write("triangle.glb", vec).unwrap();
 }
