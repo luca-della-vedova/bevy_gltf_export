@@ -395,7 +395,7 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
         let view_idx = buffers.push_buffer(bytes);
         images.push(json::Image {
             buffer_view: Some(view_idx),
-            mime_type: None,
+            mime_type: Some(json::image::MimeType("image/png".to_owned())),
             uri: None,
             extensions: None,
             name: None,
