@@ -92,7 +92,7 @@ fn create_bevy_sample_mesh2() -> (Mesh, StandardMaterial) {
     (
         mesh,
         StandardMaterial {
-            base_color: Color::rgba(1.0, 0.0, 0.5, 1.0),
+            base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
             base_color_texture: Some(Handle::default()),
             ..Default::default()
         },
