@@ -380,6 +380,8 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     let mut material = json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
             base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
+            metallic_factor: json::material::StrengthFactor(mat.metallic),
+            roughness_factor: json::material::StrengthFactor(mat.perceptual_roughness),
             // TODO(luca) other properties here
             ..Default::default()
         },
