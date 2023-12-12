@@ -40,27 +40,20 @@ pub struct CompressGltfOptions {
     pub merge_images: bool,
     // TODO(luca) implement merging for materials and textures
     //pub merge_materials: bool,
-    pub merge_textures: bool,
+    //pub merge_textures: bool,
 }
 
 impl CompressGltfOptions {
     pub fn maximum() -> Self {
-        Self {
-            merge_images: true,
-            merge_textures: true,
-        }
+        Self { merge_images: true }
     }
-}
-
-fn are_textures_equal(t1: &json::Texture, t2: &json::Texture) -> bool {
-    // Extensions and extras are ignored
-    t1.sampler == t2.sampler && t1.source == t2.source
 }
 
 #[derive(Debug, Default)]
 pub struct GltfExportResult {
     root: json::Root,
     data: Vec<u8>,
+    buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>>,
 }
 
 impl GltfExportResult {
@@ -69,14 +62,13 @@ impl GltfExportResult {
         others: T,
         options: CompressGltfOptions,
     ) -> Self {
-        let mut buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>> = HashMap::new();
         let mut others = others.into_iter().peekable();
         if others.peek().is_none() {
             return self;
         };
         if options.merge_images {
             // Build cache
-            buffer_map = self.build_image_cache();
+            self.build_image_cache();
         }
         for g2 in others {
             // For now just merge, TODO(luca) if materials are duplicated, just change the reference
@@ -136,7 +128,7 @@ impl GltfExportResult {
                     };
                     let start = view.byte_offset.unwrap_or_default() as usize;
                     let end = start + (view.byte_length as usize);
-                    match buffer_map.get(&g2.data[start..end]) {
+                    match self.buffer_map.get(&g2.data[start..end]) {
                         Some(value) => {
                             buffers_to_remove.insert(*image_buffer_view);
                             *image_buffer_view = *value;
@@ -148,44 +140,27 @@ impl GltfExportResult {
                                     .try_into()
                                     .unwrap(),
                             );
-                            buffer_map.insert(g2.data[start..end].to_vec(), *image_buffer_view);
+                            self.buffer_map
+                                .insert(g2.data[start..end].to_vec(), *image_buffer_view);
                         }
                     }
                 }
                 self.root.images.push(image);
             }
-            let mut found_textures_map = HashMap::new();
-            for (idx, mut texture) in g2.root.textures.into_iter().enumerate() {
-                // TODO(luca) Implement a hash function to make this constant time
-                if let Some(pos) = self
-                    .root
-                    .textures
-                    .iter()
-                    .position(|t| are_textures_equal(t, &texture))
-                {
-                    found_textures_map.insert(idx, pos);
-                } else {
-                    texture.source = json::Index::new(
-                        (texture.source.value() + images_offset).try_into().unwrap(),
-                    );
-                    self.root.textures.push(texture);
-                }
+            for mut texture in g2.root.textures.into_iter() {
+                texture.source =
+                    json::Index::new((texture.source.value() + images_offset).try_into().unwrap());
+                self.root.textures.push(texture);
             }
             for mut material in g2.root.materials.into_iter() {
                 if let Some(ref mut base_color_texture) =
                     material.pbr_metallic_roughness.base_color_texture
                 {
-                    // TODO(luca) put a check for the optimization boolean flag instead of default
-                    // on
-                    if let Some(pos) = found_textures_map.get(&base_color_texture.index.value()) {
-                        base_color_texture.index = json::Index::new((*pos).try_into().unwrap());
-                    } else {
-                        base_color_texture.index = json::Index::new(
-                            (base_color_texture.index.value() + textures_offset)
-                                .try_into()
-                                .unwrap(),
-                        );
-                    }
+                    base_color_texture.index = json::Index::new(
+                        (base_color_texture.index.value() + textures_offset)
+                            .try_into()
+                            .unwrap(),
+                    );
                 }
                 self.root.materials.push(material);
             }
@@ -231,9 +206,8 @@ impl GltfExportResult {
         glb.to_vec().or(Err(MeshExportError::SerializationError))
     }
 
-    fn build_image_cache(&mut self) -> HashMap<Vec<u8>, json::Index<json::buffer::View>> {
+    fn build_image_cache(&mut self) {
         // We build a hashmap of image buffers and remove duplicates / fix accessors if needed.
-        let mut buffer_map = HashMap::new();
         for image in self.root.images.iter() {
             // Fetch the buffer
             let Some(buffer_index) = image.buffer_view else {
@@ -249,16 +223,15 @@ impl GltfExportResult {
             let end = start + (view.byte_length as usize);
             let bytes_slice = &self.data[start..end];
 
-            if !buffer_map.contains_key(bytes_slice) {
+            if !self.buffer_map.contains_key(bytes_slice) {
                 // Map the index of the buffer to keep
-                buffer_map.insert(bytes_slice.to_vec(), buffer_index);
+                self.buffer_map.insert(bytes_slice.to_vec(), buffer_index);
             } else {
                 // This won't really optimize cases in which the starting mesh has multiple
                 // copies of the buffer, for now just log a warning it's not a big deal
                 println!("Warning, duplicated key found");
             }
         }
-        buffer_map
     }
 }
 
@@ -360,6 +333,12 @@ impl BuffersWrapper {
                     continue;
                 }
             }
+            /*
+            buffer: json::Buffer,
+            buffer_views: Vec<json::buffer::View>,
+            accessors: Vec<json::Accessor>,
+            data: Vec<u8>,
+            */
         }
     }
 }
@@ -655,5 +634,6 @@ pub fn export_mesh<F: Fn(&Handle<Image>) -> Option<Image>>(
             ..Default::default()
         },
         data: buffer_bytes,
+        buffer_map: Default::default(),
     })
 }
