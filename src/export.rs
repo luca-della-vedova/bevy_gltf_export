@@ -85,6 +85,7 @@ impl GltfExportResult {
             let meshes_offset = self.root.meshes.len();
             let nodes_offset = self.root.nodes.len();
             let materials_offset = self.root.materials.len();
+            let textures_offset = self.root.textures.len();
             let images_offset = self.root.images.len();
             // Now merge the vectors and update the references
             // TODO(luca) remove all try_intos and as u32 for fallible overflow checks
@@ -168,7 +169,6 @@ impl GltfExportResult {
                         (texture.source.value() + images_offset).try_into().unwrap(),
                     );
                     self.root.textures.push(texture);
-                    found_textures_map.insert(idx, self.root.textures.len() - 1);
                 }
             }
             for mut material in g2.root.materials.into_iter() {
@@ -180,8 +180,11 @@ impl GltfExportResult {
                     if let Some(pos) = found_textures_map.get(&base_color_texture.index.value()) {
                         base_color_texture.index = json::Index::new((*pos).try_into().unwrap());
                     } else {
-                        // Error!
-                        continue;
+                        base_color_texture.index = json::Index::new(
+                            (base_color_texture.index.value() + textures_offset)
+                                .try_into()
+                                .unwrap(),
+                        );
                     }
                 }
                 self.root.materials.push(material);
