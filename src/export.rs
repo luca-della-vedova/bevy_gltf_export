@@ -185,6 +185,16 @@ impl GltfExportResult {
             self.root.accessors = accessors;
             self.data = data;
         }
+        // Reassign names to textures, materials and images
+        for (idx, ref mut mat) in self.root.materials.iter_mut().enumerate() {
+            mat.name = Some(format!("Material_{}", idx));
+        }
+        for (idx, ref mut texture) in self.root.textures.iter_mut().enumerate() {
+            texture.name = Some(format!("Texture_{}", idx));
+        }
+        for (idx, ref mut image) in self.root.images.iter_mut().enumerate() {
+            image.name = Some(format!("Image_{}", idx));
+        }
         self
     }
 
