@@ -3,11 +3,12 @@ use bevy_pbr::StandardMaterial;
 use bevy_render::prelude::*;
 use gltf_json as json;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
 use json::validation::Checked::Valid;
 use std::borrow::Cow;
+use thiserror::Error;
 
 #[derive(Debug)]
 struct BuffersWrapper {
@@ -15,37 +16,57 @@ struct BuffersWrapper {
     buffer_views: Vec<json::buffer::View>,
     accessors: Vec<json::Accessor>,
     data: Vec<u8>,
+    buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum MeshExportError {
+    #[error("Mesh missing vertex positions attribute")]
     MissingVertexPosition,
+    #[error("Mesh missing vertex normals attribute")]
     MissingVertexNormal,
-    MissingVertexUv,
+    #[error("Texture not found")]
     TextureNotFound,
+    #[error("Image conversion failed")]
     ImageConversionFailed,
+    #[error("Failed serializing to bytes")]
     SerializationError,
+    #[error("Failed converting index to u32 {0}")]
+    U32CastError(std::num::TryFromIntError),
 }
 
 /// Used as a parameter for external facing functions
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GltfPose {
     pub translation: [f32; 3],
     // Unit quaternion
     pub rotation: [f32; 4],
+    pub scale: Option<[f32; 3]>,
 }
 
-#[derive(Debug)]
+impl Default for GltfPose {
+    fn default() -> Self {
+        Self {
+            translation: Default::default(),
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct CompressGltfOptions {
-    pub merge_images: bool,
+    pub skip_materials: bool,
     // TODO(luca) implement merging for materials and textures
     //pub merge_materials: bool,
     //pub merge_textures: bool,
 }
 
 impl CompressGltfOptions {
-    pub fn maximum() -> Self {
-        Self { merge_images: true }
+    pub fn skip_materials() -> Self {
+        Self {
+            skip_materials: true,
+        }
     }
 }
 
@@ -53,146 +74,21 @@ impl CompressGltfOptions {
 pub struct GltfExportResult {
     root: json::Root,
     data: Vec<u8>,
-    buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>>,
 }
 
 impl GltfExportResult {
-    pub fn combine_with<T: IntoIterator<Item = GltfExportResult>>(
-        mut self,
-        others: T,
-        options: CompressGltfOptions,
-    ) -> Self {
-        let mut others = others.into_iter().peekable();
-        if others.peek().is_none() {
-            return self;
-        };
-        if options.merge_images {
-            // Build cache
-            self.build_image_cache();
-        }
-        for g2 in others {
-            // For now just merge, TODO(luca) if materials are duplicated, just change the reference
-            let buffer_views_offset = self.root.buffer_views.len();
-            let accessors_offset = self.root.accessors.len();
-            let meshes_offset = self.root.meshes.len();
-            let nodes_offset = self.root.nodes.len();
-            let materials_offset = self.root.materials.len();
-            let textures_offset = self.root.textures.len();
-            let images_offset = self.root.images.len();
-            // Now merge the vectors and update the references
-            // TODO(luca) remove all try_intos and as u32 for fallible overflow checks
-            // TODO(luca) remove all unwraps on options below
-            let mut buffers_to_remove = BTreeSet::new();
-            for mut scene_node in g2.root.scenes[0].nodes.iter().cloned() {
-                scene_node =
-                    json::Index::new((scene_node.value() + nodes_offset).try_into().unwrap());
-                self.root.scenes[0].nodes.push(scene_node);
-            }
-            for mut node in g2.root.nodes.into_iter() {
-                if let Some(ref mut node_mesh) = node.mesh {
-                    *node_mesh =
-                        json::Index::new((node_mesh.value() + meshes_offset).try_into().unwrap());
-                }
-                self.root.nodes.push(node);
-            }
-            for mut mesh in g2.root.meshes.into_iter() {
-                for primitive in mesh.primitives.iter_mut() {
-                    if let Some(ref mut primitive_material) = primitive.material {
-                        *primitive_material = json::Index::new(
-                            (primitive_material.value() + materials_offset)
-                                .try_into()
-                                .unwrap(),
-                        );
-                    }
-                    // Update all attributes and indices
-                    for index in primitive.attributes.values_mut() {
-                        *index = json::Index::new(
-                            (index.value() + accessors_offset).try_into().unwrap(),
-                        );
-                    }
-                    if let Some(ref mut indices) = primitive.indices {
-                        *indices = json::Index::new(
-                            (indices.value() + accessors_offset).try_into().unwrap(),
-                        );
-                    }
-                }
-                self.root.meshes.push(mesh);
-            }
-            for mut image in g2.root.images.into_iter() {
-                if let Some(ref mut image_buffer_view) = image.buffer_view {
-                    // Check if it's in the map, if it is reuse an existing buffer, otherwise allocate
-                    // a new one
-                    let Some(view) = g2.root.buffer_views.get(image_buffer_view.value()) else {
-                        // Error!
-                        continue;
-                    };
-                    let start = view.byte_offset.unwrap_or_default() as usize;
-                    let end = start + (view.byte_length as usize);
-                    match self.buffer_map.get(&g2.data[start..end]) {
-                        Some(value) => {
-                            buffers_to_remove.insert(*image_buffer_view);
-                            *image_buffer_view = *value;
-                        }
-                        None => {
-                            // Keep it, insert in the hashmap
-                            *image_buffer_view = json::Index::new(
-                                (image_buffer_view.value() + buffer_views_offset)
-                                    .try_into()
-                                    .unwrap(),
-                            );
-                            self.buffer_map
-                                .insert(g2.data[start..end].to_vec(), *image_buffer_view);
-                        }
-                    }
-                }
-                self.root.images.push(image);
-            }
-            for mut texture in g2.root.textures.into_iter() {
-                texture.source =
-                    json::Index::new((texture.source.value() + images_offset).try_into().unwrap());
-                self.root.textures.push(texture);
-            }
-            for mut material in g2.root.materials.into_iter() {
-                if let Some(ref mut base_color_texture) =
-                    material.pbr_metallic_roughness.base_color_texture
-                {
-                    base_color_texture.index = json::Index::new(
-                        (base_color_texture.index.value() + textures_offset)
-                            .try_into()
-                            .unwrap(),
-                    );
-                }
-                self.root.materials.push(material);
-            }
-            // Now merge the buffers
-            let mut w1 = BuffersWrapper {
-                buffer: self.root.buffers.into_iter().next().unwrap(),
-                buffer_views: self.root.buffer_views,
-                accessors: self.root.accessors,
-                data: self.data,
-            };
-            let mut w2 = BuffersWrapper {
-                buffer: g2.root.buffers.into_iter().next().unwrap(),
-                buffer_views: g2.root.buffer_views,
-                accessors: g2.root.accessors,
-                data: g2.data,
-            };
-            w2.clear_buffers(buffers_to_remove);
-            w1.merge_with(w2);
-            let (buffer, buffer_views, accessors, data) = w1.build();
-            self.root.buffers = buffer;
-            self.root.buffer_views = buffer_views;
-            self.root.accessors = accessors;
-            self.data = data;
-        }
-        self
-    }
-
     pub fn to_bytes(self) -> Result<Vec<u8>, MeshExportError> {
         let json_string =
             json::serialize::to_string(&self.root).or(Err(MeshExportError::SerializationError))?;
-        let mut json_offset = json_string.len() as u32;
-        let buf_length = self.data.len() as u32;
+        let mut json_offset = json_string
+            .len()
+            .try_into()
+            .map_err(MeshExportError::U32CastError)?;
+        let buf_length: u32 = self
+            .data
+            .len()
+            .try_into()
+            .map_err(MeshExportError::U32CastError)?;
         align_to_multiple_of_four(&mut json_offset);
         let glb = gltf::binary::Glb {
             header: gltf::binary::Header {
@@ -204,34 +100,6 @@ impl GltfExportResult {
             json: Cow::Owned(json_string.into_bytes()),
         };
         glb.to_vec().or(Err(MeshExportError::SerializationError))
-    }
-
-    fn build_image_cache(&mut self) {
-        // We build a hashmap of image buffers and remove duplicates / fix accessors if needed.
-        for image in self.root.images.iter() {
-            // Fetch the buffer
-            let Some(buffer_index) = image.buffer_view else {
-                continue;
-            };
-            let Some(view) = self.root.buffer_views.get(buffer_index.value()) else {
-                // Error!
-                continue;
-            };
-            // TODO(luca) support multiple buffers, not really possible in glb though
-            // TODO(luca) take byte_stride into account, will probably require cloning though
-            let start = view.byte_offset.unwrap_or_default() as usize;
-            let end = start + (view.byte_length as usize);
-            let bytes_slice = &self.data[start..end];
-
-            if !self.buffer_map.contains_key(bytes_slice) {
-                // Map the index of the buffer to keep
-                self.buffer_map.insert(bytes_slice.to_vec(), buffer_index);
-            } else {
-                // This won't really optimize cases in which the starting mesh has multiple
-                // copies of the buffer, for now just log a warning it's not a big deal
-                println!("Warning, duplicated key found");
-            }
-        }
     }
 }
 
@@ -248,11 +116,16 @@ impl BuffersWrapper {
             buffer_views: vec![],
             accessors: vec![],
             data: vec![],
+            buffer_map: Default::default(),
         }
     }
 
     fn push_buffer<T>(&mut self, data: Vec<T>) -> json::Index<json::buffer::View> {
         let bytes = to_padded_byte_vector(data);
+        // Look for the buffer in the map first
+        if let Some(idx) = self.buffer_map.get(&bytes) {
+            return *idx;
+        }
         self.buffer_views.push(json::buffer::View {
             buffer: json::Index::new(0),
             byte_length: bytes.len() as u32,
@@ -263,14 +136,16 @@ impl BuffersWrapper {
             name: None,
             target: Some(Valid(json::buffer::Target::ArrayBuffer)),
         });
+        let idx = json::Index::new((self.buffer_views.len() as u32) - 1);
+        self.buffer_map.insert(bytes.clone(), idx);
         self.data.extend(bytes);
         self.buffer.byte_length = self.data.len() as u32;
-        json::Index::new((self.buffer_views.len() as u32) - 1)
+        idx
     }
 
     fn push_accessor(&mut self, accessor: json::Accessor) -> json::Index<json::Accessor> {
         self.accessors.push(accessor);
-        json::Index::<json::Accessor>::new(self.accessors.len() as u32 - 1)
+        json::Index::new(self.accessors.len() as u32 - 1)
     }
 
     fn build(
@@ -287,59 +162,6 @@ impl BuffersWrapper {
             self.accessors,
             self.data,
         )
-    }
-
-    fn merge_with(&mut self, other: BuffersWrapper) {
-        self.accessors
-            .reserve(self.accessors.len() + other.accessors.len());
-        let original_byte_length = self.buffer.byte_length;
-        let buffer_view_offset = self.buffer_views.len();
-        self.buffer_views
-            .reserve(self.buffer_views.len() + other.buffer_views.len());
-        // Merge the buffer views
-        for mut view in other.buffer_views.into_iter() {
-            if let Some(ref mut byte_offset) = view.byte_offset {
-                *byte_offset += original_byte_length;
-            }
-            self.buffer_views.push(view);
-        }
-        // Now merge the accessors
-        for mut accessor in other.accessors.into_iter() {
-            if let Some(ref mut buffer_view) = accessor.buffer_view {
-                *buffer_view = json::Index::new((buffer_view.value() + buffer_view_offset) as u32);
-            }
-            // TODO(luca) take byte offset into account?
-            self.accessors.push(accessor);
-        }
-        // Now merge the data, it doesn't need padding
-        self.data.extend(other.data);
-        self.buffer.byte_length = self.data.len() as u32;
-    }
-
-    fn clear_buffers(&mut self, buffers_to_remove: BTreeSet<json::Index<json::buffer::View>>) {
-        // Iterate in inverse order to not invalidate indexes
-        for remove in buffers_to_remove.iter().rev() {
-            // Note this panics if the index is invalid!
-            let view = self.buffer_views.remove(remove.value());
-            let start = view.byte_offset.unwrap_or_default() as usize;
-            let end = start + (view.byte_length as usize);
-            self.data.drain(start..end);
-            self.buffer.byte_length -= view.byte_length;
-            // TODO*luca) We assume that accessors don't point to this buffer, this is OK for
-            // images since they don't use accessors
-            for accessor in self.accessors.iter() {
-                if accessor.buffer_view.is_some_and(|v| v == *remove) {
-                    // Error!
-                    continue;
-                }
-            }
-            /*
-            buffer: json::Buffer,
-            buffer_views: Vec<json::buffer::View>,
-            accessors: Vec<json::Accessor>,
-            data: Vec<u8>,
-            */
-        }
     }
 }
 
@@ -363,13 +185,19 @@ fn to_padded_byte_vector<T>(vec: Vec<T>) -> Vec<u8> {
 fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     buffers: &mut BuffersWrapper,
     mat: &StandardMaterial,
-    image_getter: F,
-) -> Result<(json::Material, Vec<json::Texture>, Vec<json::Image>), MeshExportError> {
+    image_getter: &F,
+    skip: bool,
+) -> Result<(Option<json::Material>, Vec<json::Texture>, Vec<json::Image>), MeshExportError> {
+    if skip {
+        return Ok((None, vec![], vec![]));
+    }
     let mut textures = vec![];
     let mut images = vec![];
     let mut material = json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
             base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
+            metallic_factor: json::material::StrengthFactor(mat.metallic),
+            roughness_factor: json::material::StrengthFactor(mat.perceptual_roughness),
             // TODO(luca) other properties here
             ..Default::default()
         },
@@ -379,7 +207,6 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     // TODO(luca) implement samplers and other types of textures
     if let Some(base_color_texture) = &mat.base_color_texture {
         let image = image_getter(base_color_texture).ok_or(MeshExportError::TextureNotFound)?;
-        let texture_idx = json::Index::<json::Image>::new(0);
         let image_size = image.size();
         let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
             image::ImageBuffer::from_raw(image_size[0] as u32, image_size[1] as u32, image.data)
@@ -403,7 +230,7 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
         });
         textures.push(json::Texture {
             sampler: None,
-            source: texture_idx,
+            source: json::Index::new(0),
             extensions: None,
             name: None,
             extras: Default::default(),
@@ -415,35 +242,29 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
             extras: Default::default(),
         });
     }
-    Ok((material, textures, images))
+    Ok((Some(material), textures, images))
 }
 
 struct VerticesData {
     positions: json::Index<json::Accessor>,
     normals: json::Index<json::Accessor>,
-    uvs: json::Index<json::Accessor>,
+    uvs: Option<json::Index<json::Accessor>>,
     indices: Option<json::Index<json::Accessor>>,
 }
 
 fn get_vertices_data(
     buffers: &mut BuffersWrapper,
-    mut mesh: Mesh,
+    mesh: &Mesh,
 ) -> Result<VerticesData, MeshExportError> {
     let Some(bevy_render::mesh::VertexAttributeValues::Float32x3(positions)) =
-        mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION)
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
     else {
         return Err(MeshExportError::MissingVertexPosition);
     };
     let Some(bevy_render::mesh::VertexAttributeValues::Float32x3(normals)) =
-        mesh.remove_attribute(Mesh::ATTRIBUTE_NORMAL)
+        mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
     else {
         return Err(MeshExportError::MissingVertexNormal);
-    };
-
-    let Some(bevy_render::mesh::VertexAttributeValues::Float32x2(uvs)) =
-        mesh.remove_attribute(Mesh::ATTRIBUTE_UV_0)
-    else {
-        return Err(MeshExportError::MissingVertexUv);
     };
 
     // Find min and max for bounding box
@@ -458,7 +279,7 @@ fn get_vertices_data(
     }
 
     let num_vertices = positions.len() as u32;
-    let position_view_idx = buffers.push_buffer(positions);
+    let position_view_idx = buffers.push_buffer(positions.clone());
     let positions = json::Accessor {
         buffer_view: Some(position_view_idx),
         byte_offset: None,
@@ -475,7 +296,7 @@ fn get_vertices_data(
         normalized: false,
         sparse: None,
     };
-    let normals_view_idx = buffers.push_buffer(normals);
+    let normals_view_idx = buffers.push_buffer(normals.clone());
     let normals = json::Accessor {
         buffer_view: Some(normals_view_idx),
         byte_offset: None,
@@ -492,26 +313,33 @@ fn get_vertices_data(
         normalized: false,
         sparse: None,
     };
-    let uvs_view_idx = buffers.push_buffer(uvs);
-    let uvs = json::Accessor {
-        buffer_view: Some(uvs_view_idx),
-        byte_offset: None,
-        count: num_vertices,
-        component_type: Valid(json::accessor::GenericComponentType(
-            json::accessor::ComponentType::F32,
-        )),
-        extensions: Default::default(),
-        extras: Default::default(),
-        type_: Valid(json::accessor::Type::Vec2),
-        min: None,
-        max: None,
-        name: None,
-        normalized: false,
-        sparse: None,
+    let uvs = if let Some(bevy_render::mesh::VertexAttributeValues::Float32x2(uvs)) =
+        mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+    {
+        let uvs_view_idx = buffers.push_buffer(uvs.clone());
+        let uvs = json::Accessor {
+            buffer_view: Some(uvs_view_idx),
+            byte_offset: None,
+            count: num_vertices,
+            component_type: Valid(json::accessor::GenericComponentType(
+                json::accessor::ComponentType::F32,
+            )),
+            extensions: Default::default(),
+            extras: Default::default(),
+            type_: Valid(json::accessor::Type::Vec2),
+            min: None,
+            max: None,
+            name: None,
+            normalized: false,
+            sparse: None,
+        };
+        Some(buffers.push_accessor(uvs))
+    } else {
+        None
     };
+
     let positions = buffers.push_accessor(positions);
     let normals = buffers.push_accessor(normals);
-    let uvs = buffers.push_accessor(uvs);
     let indices = get_indices_data(buffers, mesh.indices());
     Ok(VerticesData {
         positions,
@@ -551,89 +379,179 @@ fn get_indices_data(
     Some(accessor_idx)
 }
 
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    uv: [f32; 2],
+#[derive(Clone, Debug)]
+pub struct MeshData<'a> {
+    pub mesh: &'a Mesh,
+    pub material: &'a StandardMaterial,
+    pub pose: Option<GltfPose>,
 }
 
-pub fn export_mesh<F: Fn(&Handle<Image>) -> Option<Image>>(
-    mesh: Mesh,
-    material: StandardMaterial,
-    pose: Option<GltfPose>,
+pub fn export_meshes<
+    'a,
+    F: Fn(&Handle<Image>) -> Option<Image>,
+    I: IntoIterator<Item = MeshData<'a>>,
+>(
+    meshes: I,
+    target_name: Option<String>,
     image_getter: F,
+    options: CompressGltfOptions,
 ) -> Result<GltfExportResult, MeshExportError> {
     let mut buffers = BuffersWrapper::new();
-    let vertices_data = get_vertices_data(&mut buffers, mesh)?;
+    let mut root = json::Root {
+        scenes: vec![json::Scene {
+            extensions: Default::default(),
+            extras: Default::default(),
+            name: target_name,
+            nodes: vec![],
+        }],
+        ..Default::default()
+    };
+    for data in meshes.into_iter() {
+        let accessors_offset = root.accessors.len();
+        let meshes_offset = root.meshes.len();
+        let materials_offset = root.materials.len();
+        let textures_offset = root.textures.len();
+        let images_offset = root.images.len();
 
-    let (material, textures, images) = to_gltf_material(&mut buffers, &material, image_getter)?;
+        let vertices_data = get_vertices_data(&mut buffers, data.mesh)?;
 
-    let primitive = json::mesh::Primitive {
-        attributes: {
-            let mut map = std::collections::BTreeMap::new();
-            map.insert(
-                Valid(json::mesh::Semantic::Positions),
-                vertices_data.positions,
+        let (material, textures, images) = to_gltf_material(
+            &mut buffers,
+            data.material,
+            &image_getter,
+            options.skip_materials,
+        )?;
+
+        let mut primitive = json::mesh::Primitive {
+            attributes: {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    Valid(json::mesh::Semantic::Positions),
+                    json::Index::new(
+                        (vertices_data.positions.value() + accessors_offset)
+                            .try_into()
+                            .map_err(MeshExportError::U32CastError)?,
+                    ),
+                );
+                map.insert(
+                    Valid(json::mesh::Semantic::Normals),
+                    json::Index::new(
+                        (vertices_data.normals.value() + accessors_offset)
+                            .try_into()
+                            .map_err(MeshExportError::U32CastError)?,
+                    ),
+                );
+                if let Some(uvs) = vertices_data.uvs {
+                    map.insert(
+                        Valid(json::mesh::Semantic::TexCoords(0)),
+                        json::Index::new(
+                            (uvs.value() + accessors_offset)
+                                .try_into()
+                                .map_err(MeshExportError::U32CastError)?,
+                        ),
+                    );
+                }
+                map
+            },
+            extensions: Default::default(),
+            extras: Default::default(),
+            indices: None,
+            material: None,
+            mode: Valid(json::mesh::Mode::Triangles),
+            targets: None,
+        };
+        if let Some(indices) = vertices_data.indices {
+            primitive.indices = Some(json::Index::new(
+                (indices.value() + accessors_offset)
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            ));
+        }
+        if material.is_some() {
+            primitive.material = Some(json::Index::new(
+                materials_offset
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            ));
+        }
+
+        let mesh = json::Mesh {
+            extensions: Default::default(),
+            extras: Default::default(),
+            name: None,
+            primitives: vec![primitive],
+            weights: None,
+        };
+
+        let node = json::Node {
+            camera: None,
+            children: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+            matrix: None,
+            mesh: Some(json::Index::new(
+                meshes_offset
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            )),
+            name: None,
+            rotation: data
+                .pose
+                .as_ref()
+                .map(|p| json::scene::UnitQuaternion(p.rotation)),
+            scale: data.pose.as_ref().and_then(|p| p.scale),
+            translation: data.pose.map(|p| p.translation),
+            skin: None,
+            weights: None,
+        };
+        root.meshes.push(mesh);
+        root.nodes.push(node);
+        root.images.extend(images);
+
+        // For now just merge, TODO(luca) if materials are duplicated, just change the reference
+        for mut texture in textures.into_iter() {
+            texture.source = json::Index::new(
+                (texture.source.value() + images_offset)
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
             );
-            map.insert(Valid(json::mesh::Semantic::Normals), vertices_data.normals);
-            map.insert(Valid(json::mesh::Semantic::TexCoords(0)), vertices_data.uvs);
-            map
-        },
-        extensions: Default::default(),
-        extras: Default::default(),
-        indices: vertices_data.indices,
-        material: Some(json::Index::<json::Material>::new(0)),
-        mode: Valid(json::mesh::Mode::Triangles),
-        targets: None,
-    };
-
-    let mesh = json::Mesh {
-        extensions: Default::default(),
-        extras: Default::default(),
-        name: None,
-        primitives: vec![primitive],
-        weights: None,
-    };
-
-    let node = json::Node {
-        camera: None,
-        children: None,
-        extensions: Default::default(),
-        extras: Default::default(),
-        matrix: None,
-        mesh: Some(json::Index::new(0)),
-        name: None,
-        rotation: pose
-            .as_ref()
-            .map(|p| json::scene::UnitQuaternion(p.rotation)),
-        scale: None,
-        translation: pose.map(|p| p.translation),
-        skin: None,
-        weights: None,
-    };
+            root.textures.push(texture);
+        }
+        if let Some(mut material) = material {
+            if let Some(ref mut base_color_texture) =
+                material.pbr_metallic_roughness.base_color_texture
+            {
+                base_color_texture.index = json::Index::new(
+                    (base_color_texture.index.value() + textures_offset)
+                        .try_into()
+                        .map_err(MeshExportError::U32CastError)?,
+                );
+            }
+            root.materials.push(material);
+        }
+    }
+    root.scenes[0].nodes = (0u32..root
+        .nodes
+        .len()
+        .try_into()
+        .map_err(MeshExportError::U32CastError)?)
+        .map(json::Index::new)
+        .collect();
     let (buffers, buffer_views, accessors, buffer_bytes) = buffers.build();
-
+    root.accessors = accessors;
+    root.buffers = buffers;
+    root.buffer_views = buffer_views;
+    for (idx, ref mut mat) in root.materials.iter_mut().enumerate() {
+        mat.name = Some(format!("Material_{}", idx));
+    }
+    for (idx, ref mut texture) in root.textures.iter_mut().enumerate() {
+        texture.name = Some(format!("Texture_{}", idx));
+    }
+    for (idx, ref mut image) in root.images.iter_mut().enumerate() {
+        image.name = Some(format!("Image_{}", idx));
+    }
     Ok(GltfExportResult {
-        root: json::Root {
-            accessors,
-            buffers,
-            buffer_views,
-            meshes: vec![mesh],
-            nodes: vec![node],
-            scenes: vec![json::Scene {
-                extensions: Default::default(),
-                extras: Default::default(),
-                name: None,
-                nodes: vec![json::Index::new(0)],
-            }],
-            materials: vec![material],
-            textures,
-            images,
-            ..Default::default()
-        },
+        root,
         data: buffer_bytes,
-        buffer_map: Default::default(),
     })
 }

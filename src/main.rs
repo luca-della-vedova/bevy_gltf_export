@@ -5,7 +5,7 @@ use bevy_render::prelude::*;
 use bevy_render::render_resource::PrimitiveTopology;
 use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use bevy_gltf_export::{export_mesh, CompressGltfOptions, MeshExportError};
+use bevy_gltf_export::{export_meshes, CompressGltfOptions, GltfPose, MeshData, MeshExportError};
 
 fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
     // Create a new mesh using a triangle list topology, where each set of 3 vertices composes a triangle.
@@ -117,11 +117,30 @@ fn sample_image_getter(_id: &Handle<Image>) -> Option<Image> {
 fn export_test_mesh() -> Result<Vec<u8>, MeshExportError> {
     let (mesh, material) = create_bevy_sample_mesh();
     let (mesh2, material2) = create_bevy_sample_mesh2();
-    let (mesh3, material3) = create_bevy_sample_mesh2();
-    let res = export_mesh(mesh, material, None, sample_image_getter)?;
-    let res2 = export_mesh(mesh2, material2, None, sample_image_getter)?;
-    let res3 = export_mesh(mesh3, material3, None, sample_image_getter)?;
-    let res = res.combine_with([res2, res3], CompressGltfOptions::maximum());
+    let data1 = MeshData {
+        mesh: &mesh,
+        material: &material,
+        pose: None,
+    };
+    let data2 = MeshData {
+        mesh: &mesh2,
+        material: &material2,
+        pose: None,
+    };
+    let data3 = MeshData {
+        mesh: &mesh,
+        material: &material2,
+        pose: Some(GltfPose {
+            translation: [2.0, 2.0, 2.0],
+            ..Default::default()
+        }),
+    };
+    let res = export_meshes(
+        [data1, data2, data3],
+        None,
+        sample_image_getter,
+        CompressGltfOptions::default(),
+    )?;
     res.to_bytes()
 }
 
