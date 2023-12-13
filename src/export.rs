@@ -8,6 +8,7 @@ use std::mem;
 
 use json::validation::Checked::Valid;
 use std::borrow::Cow;
+use thiserror::Error;
 
 #[derive(Debug)]
 struct BuffersWrapper {
@@ -18,14 +19,20 @@ struct BuffersWrapper {
     buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum MeshExportError {
+    #[error("Mesh missing vertex positions attribute")]
     MissingVertexPosition,
+    #[error("Mesh missing vertex normals attribute")]
     MissingVertexNormal,
-    MissingVertexUv,
+    #[error("Texture not found")]
     TextureNotFound,
+    #[error("Image conversion failed")]
     ImageConversionFailed,
+    #[error("Failed serializing to bytes")]
     SerializationError,
+    #[error("Failed converting index to u32 {0}")]
+    U32CastError(std::num::TryFromIntError),
 }
 
 /// Used as a parameter for external facing functions
@@ -73,8 +80,15 @@ impl GltfExportResult {
     pub fn to_bytes(self) -> Result<Vec<u8>, MeshExportError> {
         let json_string =
             json::serialize::to_string(&self.root).or(Err(MeshExportError::SerializationError))?;
-        let mut json_offset = json_string.len() as u32;
-        let buf_length = self.data.len() as u32;
+        let mut json_offset = json_string
+            .len()
+            .try_into()
+            .map_err(MeshExportError::U32CastError)?;
+        let buf_length: u32 = self
+            .data
+            .len()
+            .try_into()
+            .map_err(MeshExportError::U32CastError)?;
         align_to_multiple_of_four(&mut json_offset);
         let glb = gltf::binary::Glb {
             header: gltf::binary::Header {
@@ -131,7 +145,7 @@ impl BuffersWrapper {
 
     fn push_accessor(&mut self, accessor: json::Accessor) -> json::Index<json::Accessor> {
         self.accessors.push(accessor);
-        json::Index::<json::Accessor>::new(self.accessors.len() as u32 - 1)
+        json::Index::new(self.accessors.len() as u32 - 1)
     }
 
     fn build(
@@ -193,7 +207,6 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     // TODO(luca) implement samplers and other types of textures
     if let Some(base_color_texture) = &mat.base_color_texture {
         let image = image_getter(base_color_texture).ok_or(MeshExportError::TextureNotFound)?;
-        let texture_idx = json::Index::<json::Image>::new(0);
         let image_size = image.size();
         let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
             image::ImageBuffer::from_raw(image_size[0] as u32, image_size[1] as u32, image.data)
@@ -217,7 +230,7 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
         });
         textures.push(json::Texture {
             sampler: None,
-            source: texture_idx,
+            source: json::Index::new(0),
             extensions: None,
             name: None,
             extras: Default::default(),
@@ -409,7 +422,7 @@ pub fn export_meshes<
             options.skip_materials,
         )?;
 
-        let primitive = json::mesh::Primitive {
+        let mut primitive = json::mesh::Primitive {
             attributes: {
                 let mut map = BTreeMap::new();
                 map.insert(
@@ -417,7 +430,7 @@ pub fn export_meshes<
                     json::Index::new(
                         (vertices_data.positions.value() + accessors_offset)
                             .try_into()
-                            .unwrap(),
+                            .map_err(MeshExportError::U32CastError)?,
                     ),
                 );
                 map.insert(
@@ -425,28 +438,42 @@ pub fn export_meshes<
                     json::Index::new(
                         (vertices_data.normals.value() + accessors_offset)
                             .try_into()
-                            .unwrap(),
+                            .map_err(MeshExportError::U32CastError)?,
                     ),
                 );
                 if let Some(uvs) = vertices_data.uvs {
                     map.insert(
                         Valid(json::mesh::Semantic::TexCoords(0)),
-                        json::Index::new((uvs.value() + accessors_offset).try_into().unwrap()),
+                        json::Index::new(
+                            (uvs.value() + accessors_offset)
+                                .try_into()
+                                .map_err(MeshExportError::U32CastError)?,
+                        ),
                     );
                 }
                 map
             },
             extensions: Default::default(),
             extras: Default::default(),
-            indices: vertices_data
-                .indices
-                .map(|i| json::Index::new((i.value() + accessors_offset).try_into().unwrap())),
-            material: material
-                .as_ref()
-                .map(|_| json::Index::new(materials_offset.try_into().unwrap())),
+            indices: None,
+            material: None,
             mode: Valid(json::mesh::Mode::Triangles),
             targets: None,
         };
+        if let Some(indices) = vertices_data.indices {
+            primitive.indices = Some(json::Index::new(
+                (indices.value() + accessors_offset)
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            ));
+        }
+        if material.is_some() {
+            primitive.material = Some(json::Index::new(
+                materials_offset
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            ));
+        }
 
         let mesh = json::Mesh {
             extensions: Default::default(),
@@ -462,7 +489,11 @@ pub fn export_meshes<
             extensions: Default::default(),
             extras: Default::default(),
             matrix: None,
-            mesh: Some(json::Index::new(meshes_offset.try_into().unwrap())),
+            mesh: Some(json::Index::new(
+                meshes_offset
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            )),
             name: None,
             rotation: data
                 .pose
@@ -475,19 +506,15 @@ pub fn export_meshes<
         };
         root.meshes.push(mesh);
         root.nodes.push(node);
-        // TODO(luca) just put this at the end through an range iter collect
-        root.scenes[0]
-            .nodes
-            .push(json::Index::new((root.nodes.len() - 1).try_into().unwrap()));
         root.images.extend(images);
 
         // For now just merge, TODO(luca) if materials are duplicated, just change the reference
-        // Now merge the vectors and update the references
-        // TODO(luca) remove all try_intos and as u32 for fallible overflow checks
-        // TODO(luca) remove all unwraps on options below
         for mut texture in textures.into_iter() {
-            texture.source =
-                json::Index::new((texture.source.value() + images_offset).try_into().unwrap());
+            texture.source = json::Index::new(
+                (texture.source.value() + images_offset)
+                    .try_into()
+                    .map_err(MeshExportError::U32CastError)?,
+            );
             root.textures.push(texture);
         }
         if let Some(mut material) = material {
@@ -497,12 +524,19 @@ pub fn export_meshes<
                 base_color_texture.index = json::Index::new(
                     (base_color_texture.index.value() + textures_offset)
                         .try_into()
-                        .unwrap(),
+                        .map_err(MeshExportError::U32CastError)?,
                 );
             }
             root.materials.push(material);
         }
     }
+    root.scenes[0].nodes = (0u32..root
+        .nodes
+        .len()
+        .try_into()
+        .map_err(MeshExportError::U32CastError)?)
+        .map(json::Index::new)
+        .collect();
     let (buffers, buffer_views, accessors, buffer_bytes) = buffers.build();
     root.accessors = accessors;
     root.buffers = buffers;
