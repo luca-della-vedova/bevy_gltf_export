@@ -4,11 +4,44 @@ use bevy_render::prelude::*;
 use gltf_json as json;
 
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::mem;
 
 use json::validation::Checked::Valid;
 use std::borrow::Cow;
 use thiserror::Error;
+
+#[derive(Debug, Clone)]
+struct HashableAccessor(json::Accessor);
+
+impl PartialEq for HashableAccessor {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.buffer_view == other.0.buffer_view &&
+        self.0.byte_offset == other.0.byte_offset &&
+        self.0.count == other.0.count &&
+        // TODO(luca) other components
+        //self.0.component_type == other.0.component_type &&
+        self.0.type_ == other.0.type_
+    }
+}
+
+impl Eq for HashableAccessor {}
+
+impl Hash for HashableAccessor {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.buffer_view.hash(state);
+        self.0.byte_offset.hash(state);
+        self.0.count.hash(state);
+        if let Valid(t) = self.0.component_type.as_ref() {
+            t.0.as_gl_enum().hash(state);
+        }
+        if let Valid(t) = self.0.type_.as_ref() {
+            t.multiplicity().hash(state);
+        }
+        // TODO(luca) we don't use other fields for now
+        // TODO(luca) we can't hash min and max because they are f64
+    }
+}
 
 #[derive(Debug)]
 struct BuffersWrapper {
@@ -17,6 +50,7 @@ struct BuffersWrapper {
     accessors: Vec<json::Accessor>,
     data: Vec<u8>,
     buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>>,
+    accessor_map: HashMap<HashableAccessor, json::Index<json::Accessor>>,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -117,6 +151,7 @@ impl BuffersWrapper {
             accessors: vec![],
             data: vec![],
             buffer_map: Default::default(),
+            accessor_map: Default::default(),
         }
     }
 
@@ -144,8 +179,15 @@ impl BuffersWrapper {
     }
 
     fn push_accessor(&mut self, accessor: json::Accessor) -> json::Index<json::Accessor> {
-        self.accessors.push(accessor);
-        json::Index::new(self.accessors.len() as u32 - 1)
+        let hashable = HashableAccessor(accessor.clone());
+        if let Some(idx) = self.accessor_map.get(&hashable) {
+            *idx
+        } else {
+            self.accessors.push(accessor);
+            let idx = json::Index::new(self.accessors.len() as u32 - 1);
+            self.accessor_map.insert(hashable, idx);
+            idx
+        }
     }
 
     fn build(
@@ -407,7 +449,6 @@ pub fn export_meshes<
         ..Default::default()
     };
     for data in meshes.into_iter() {
-        let accessors_offset = root.accessors.len();
         let meshes_offset = root.meshes.len();
         let materials_offset = root.materials.len();
         let textures_offset = root.textures.len();
@@ -427,29 +468,11 @@ pub fn export_meshes<
                 let mut map = BTreeMap::new();
                 map.insert(
                     Valid(json::mesh::Semantic::Positions),
-                    json::Index::new(
-                        (vertices_data.positions.value() + accessors_offset)
-                            .try_into()
-                            .map_err(MeshExportError::U32CastError)?,
-                    ),
+                    vertices_data.positions,
                 );
-                map.insert(
-                    Valid(json::mesh::Semantic::Normals),
-                    json::Index::new(
-                        (vertices_data.normals.value() + accessors_offset)
-                            .try_into()
-                            .map_err(MeshExportError::U32CastError)?,
-                    ),
-                );
+                map.insert(Valid(json::mesh::Semantic::Normals), vertices_data.normals);
                 if let Some(uvs) = vertices_data.uvs {
-                    map.insert(
-                        Valid(json::mesh::Semantic::TexCoords(0)),
-                        json::Index::new(
-                            (uvs.value() + accessors_offset)
-                                .try_into()
-                                .map_err(MeshExportError::U32CastError)?,
-                        ),
-                    );
+                    map.insert(Valid(json::mesh::Semantic::TexCoords(0)), uvs);
                 }
                 map
             },
@@ -461,11 +484,7 @@ pub fn export_meshes<
             targets: None,
         };
         if let Some(indices) = vertices_data.indices {
-            primitive.indices = Some(json::Index::new(
-                (indices.value() + accessors_offset)
-                    .try_into()
-                    .map_err(MeshExportError::U32CastError)?,
-            ));
+            primitive.indices = Some(indices);
         }
         if material.is_some() {
             primitive.material = Some(json::Index::new(
@@ -475,13 +494,30 @@ pub fn export_meshes<
             ));
         }
 
-        let mesh = json::Mesh {
-            extensions: Default::default(),
-            extras: Default::default(),
-            name: None,
-            primitives: vec![primitive],
-            weights: None,
-        };
+        let mesh_idx = root
+            .meshes
+            .iter()
+            .enumerate()
+            .find(|(_, mesh)| {
+                let p = &mesh.primitives[0];
+                p.attributes == primitive.attributes &&
+            p.indices == primitive.indices &&
+            // TODO(luca) implement equality for materials as well
+            //p.material == primitive.material &&
+            p.mode == primitive.mode
+            })
+            .map(|elem| elem.0)
+            .unwrap_or_else(|| {
+                let mesh = json::Mesh {
+                    extensions: Default::default(),
+                    extras: Default::default(),
+                    name: None,
+                    primitives: vec![primitive],
+                    weights: None,
+                };
+                root.meshes.push(mesh);
+                meshes_offset
+            });
 
         let node = json::Node {
             camera: None,
@@ -490,9 +526,7 @@ pub fn export_meshes<
             extras: Default::default(),
             matrix: None,
             mesh: Some(json::Index::new(
-                meshes_offset
-                    .try_into()
-                    .map_err(MeshExportError::U32CastError)?,
+                mesh_idx.try_into().map_err(MeshExportError::U32CastError)?,
             )),
             name: None,
             rotation: data
@@ -504,7 +538,6 @@ pub fn export_meshes<
             skin: None,
             weights: None,
         };
-        root.meshes.push(mesh);
         root.nodes.push(node);
         root.images.extend(images);
 
