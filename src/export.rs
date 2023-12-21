@@ -48,6 +48,8 @@ struct BuffersWrapper {
     buffer: json::Buffer,
     buffer_views: Vec<json::buffer::View>,
     accessors: Vec<json::Accessor>,
+    images: Vec<json::Image>,
+    textures: Vec<json::Texture>,
     data: Vec<u8>,
     buffer_map: HashMap<Vec<u8>, json::Index<json::buffer::View>>,
     accessor_map: HashMap<HashableAccessor, json::Index<json::Accessor>>,
@@ -149,17 +151,20 @@ impl BuffersWrapper {
             },
             buffer_views: vec![],
             accessors: vec![],
+            images: vec![],
+            textures: vec![],
             data: vec![],
             buffer_map: Default::default(),
             accessor_map: Default::default(),
         }
     }
 
-    fn push_buffer<T>(&mut self, data: Vec<T>) -> json::Index<json::buffer::View> {
+    // Returns true if the buffer was added, false if it was found
+    fn push_buffer<T>(&mut self, data: Vec<T>) -> (json::Index<json::buffer::View>, bool) {
         let bytes = to_padded_byte_vector(data);
         // Look for the buffer in the map first
         if let Some(idx) = self.buffer_map.get(&bytes) {
-            return *idx;
+            return (*idx, false);
         }
         self.buffer_views.push(json::buffer::View {
             buffer: json::Index::new(0),
@@ -175,7 +180,7 @@ impl BuffersWrapper {
         self.buffer_map.insert(bytes.clone(), idx);
         self.data.extend(bytes);
         self.buffer.byte_length = self.data.len().into();
-        idx
+        (idx, true)
     }
 
     fn push_accessor(&mut self, accessor: json::Accessor) -> json::Index<json::Accessor> {
@@ -190,18 +195,82 @@ impl BuffersWrapper {
         }
     }
 
+    fn push_image(&mut self, image: Image) -> Result<json::Index<json::Texture>, MeshExportError> {
+        let image_size = image.size();
+        let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
+            image::ImageBuffer::from_raw(image_size[0] as u32, image_size[1] as u32, image.data)
+                .ok_or(MeshExportError::ImageConversionFailed)?;
+        let mut bytes: Vec<u8> = Vec::new();
+        image_buffer
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageOutputFormat::Png,
+            )
+            .or(Err(MeshExportError::ImageConversionFailed))?;
+
+        let (view_idx, added) = self.push_buffer(bytes);
+        let texture_idx = if added {
+            let image_idx = json::Index::new(self.images.len().try_into().unwrap());
+            let texture_idx = json::Index::new(self.images.len().try_into().unwrap());
+            self.images.push(json::Image {
+                buffer_view: Some(view_idx),
+                mime_type: Some(json::image::MimeType("image/png".to_owned())),
+                uri: None,
+                extensions: None,
+                name: None,
+                extras: Default::default(),
+            });
+            self.textures.push(json::Texture {
+                sampler: None,
+                source: image_idx,
+                extensions: None,
+                name: None,
+                extras: Default::default(),
+            });
+            texture_idx
+        } else {
+            // Find the matching image
+            let img_idx = json::Index::new(
+                self.images
+                    .iter()
+                    .enumerate()
+                    .find(|(_, img)| img.buffer_view == Some(view_idx))
+                    .unwrap()
+                    .0
+                    .try_into()
+                    .unwrap(),
+            );
+            // Now find the texture
+            json::Index::new(
+                self.textures
+                    .iter()
+                    .enumerate()
+                    .find(|(_, texture)| texture.source == img_idx)
+                    .unwrap()
+                    .0
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        Ok(texture_idx)
+    }
+
     fn build(
         self,
     ) -> (
         Vec<json::Buffer>,
         Vec<json::buffer::View>,
         Vec<json::Accessor>,
+        Vec<json::Image>,
+        Vec<json::Texture>,
         Vec<u8>,
     ) {
         (
             vec![self.buffer],
             self.buffer_views,
             self.accessors,
+            self.images,
+            self.textures,
             self.data,
         )
     }
@@ -229,12 +298,10 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     mat: &StandardMaterial,
     image_getter: &F,
     skip: bool,
-) -> Result<(Option<json::Material>, Vec<json::Texture>, Vec<json::Image>), MeshExportError> {
+) -> Result<Option<json::Material>, MeshExportError> {
     if skip {
-        return Ok((None, vec![], vec![]));
+        return Ok(None);
     }
-    let mut textures = vec![];
-    let mut images = vec![];
     let mut material = json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
             base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
@@ -249,42 +316,15 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     // TODO(luca) implement samplers and other types of textures
     if let Some(base_color_texture) = &mat.base_color_texture {
         let image = image_getter(base_color_texture).ok_or(MeshExportError::TextureNotFound)?;
-        let image_size = image.size();
-        let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
-            image::ImageBuffer::from_raw(image_size[0] as u32, image_size[1] as u32, image.data)
-                .ok_or(MeshExportError::ImageConversionFailed)?;
-        let mut bytes: Vec<u8> = Vec::new();
-        image_buffer
-            .write_to(
-                &mut std::io::Cursor::new(&mut bytes),
-                image::ImageOutputFormat::Png,
-            )
-            .or(Err(MeshExportError::ImageConversionFailed))?;
-
-        let view_idx = buffers.push_buffer(bytes);
-        images.push(json::Image {
-            buffer_view: Some(view_idx),
-            mime_type: Some(json::image::MimeType("image/png".to_owned())),
-            uri: None,
-            extensions: None,
-            name: None,
-            extras: Default::default(),
-        });
-        textures.push(json::Texture {
-            sampler: None,
-            source: json::Index::new(0),
-            extensions: None,
-            name: None,
-            extras: Default::default(),
-        });
+        let texture_idx = buffers.push_image(image)?;
         material.pbr_metallic_roughness.base_color_texture = Some(json::texture::Info {
-            index: json::Index::new(0),
+            index: texture_idx,
             tex_coord: 0,
             extensions: None,
             extras: Default::default(),
         });
     }
-    Ok((Some(material), textures, images))
+    Ok(Some(material))
 }
 
 struct VerticesData {
@@ -321,7 +361,7 @@ fn get_vertices_data(
     }
 
     let num_vertices = positions.len().into();
-    let position_view_idx = buffers.push_buffer(positions.clone());
+    let position_view_idx = buffers.push_buffer(positions.clone()).0;
     let positions = json::Accessor {
         buffer_view: Some(position_view_idx),
         byte_offset: None,
@@ -338,7 +378,7 @@ fn get_vertices_data(
         normalized: false,
         sparse: None,
     };
-    let normals_view_idx = buffers.push_buffer(normals.clone());
+    let normals_view_idx = buffers.push_buffer(normals.clone()).0;
     let normals = json::Accessor {
         buffer_view: Some(normals_view_idx),
         byte_offset: None,
@@ -358,7 +398,7 @@ fn get_vertices_data(
     let uvs = if let Some(bevy_render::mesh::VertexAttributeValues::Float32x2(uvs)) =
         mesh.attribute(Mesh::ATTRIBUTE_UV_0)
     {
-        let uvs_view_idx = buffers.push_buffer(uvs.clone());
+        let uvs_view_idx = buffers.push_buffer(uvs.clone()).0;
         let uvs = json::Accessor {
             buffer_view: Some(uvs_view_idx),
             byte_offset: None,
@@ -400,7 +440,7 @@ fn get_indices_data(
     };
     let count = mesh_indices.len().into();
     let indices = mesh_indices.iter().map(|idx| idx as u32).collect();
-    let view_idx = buffers.push_buffer(indices);
+    let view_idx = buffers.push_buffer(indices).0;
     // TODO(luca) Indexes can also be u8 / u16
     let accessor_idx = buffers.push_accessor(json::Accessor {
         buffer_view: Some(view_idx),
@@ -451,12 +491,10 @@ pub fn export_meshes<
     for data in meshes.into_iter() {
         let meshes_offset = root.meshes.len();
         let materials_offset = root.materials.len();
-        let textures_offset = root.textures.len();
-        let images_offset = root.images.len();
 
         let vertices_data = get_vertices_data(&mut buffers, data.mesh)?;
 
-        let (material, textures, images) = to_gltf_material(
+        let material = to_gltf_material(
             &mut buffers,
             data.material,
             &image_getter,
@@ -500,11 +538,11 @@ pub fn export_meshes<
             .enumerate()
             .find(|(_, mesh)| {
                 let p = &mesh.primitives[0];
-                p.attributes == primitive.attributes &&
-            p.indices == primitive.indices &&
-            // TODO(luca) implement equality for materials as well
-            //p.material == primitive.material &&
-            p.mode == primitive.mode
+                // TODO(luca) implement equality for materials as well
+                //p.material == primitive.material &&
+                p.attributes == primitive.attributes
+                    && p.indices == primitive.indices
+                    && p.mode == primitive.mode
             })
             .map(|elem| elem.0)
             .unwrap_or_else(|| {
@@ -539,27 +577,8 @@ pub fn export_meshes<
             weights: None,
         };
         root.nodes.push(node);
-        root.images.extend(images);
 
-        // For now just merge, TODO(luca) if materials are duplicated, just change the reference
-        for mut texture in textures.into_iter() {
-            texture.source = json::Index::new(
-                (texture.source.value() + images_offset)
-                    .try_into()
-                    .map_err(MeshExportError::U32CastError)?,
-            );
-            root.textures.push(texture);
-        }
-        if let Some(mut material) = material {
-            if let Some(ref mut base_color_texture) =
-                material.pbr_metallic_roughness.base_color_texture
-            {
-                base_color_texture.index = json::Index::new(
-                    (base_color_texture.index.value() + textures_offset)
-                        .try_into()
-                        .map_err(MeshExportError::U32CastError)?,
-                );
-            }
+        if let Some(material) = material {
             root.materials.push(material);
         }
     }
@@ -570,8 +589,10 @@ pub fn export_meshes<
         .map_err(MeshExportError::U32CastError)?)
         .map(json::Index::new)
         .collect();
-    let (buffers, buffer_views, accessors, buffer_bytes) = buffers.build();
+    let (buffers, buffer_views, accessors, images, textures, buffer_bytes) = buffers.build();
     root.accessors = accessors;
+    root.images = images;
+    root.textures = textures;
     root.buffers = buffers;
     root.buffer_views = buffer_views;
     for (idx, ref mut mat) in root.materials.iter_mut().enumerate() {
