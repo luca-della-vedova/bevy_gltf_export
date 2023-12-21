@@ -107,7 +107,7 @@ impl BuffersWrapper {
     fn new() -> Self {
         Self {
             buffer: json::Buffer {
-                byte_length: 0,
+                byte_length: 0_u64.into(),
                 extensions: Default::default(),
                 extras: Default::default(),
                 name: None,
@@ -128,9 +128,9 @@ impl BuffersWrapper {
         }
         self.buffer_views.push(json::buffer::View {
             buffer: json::Index::new(0),
-            byte_length: bytes.len() as u32,
+            byte_length: bytes.len().into(),
             byte_offset: Some(self.buffer.byte_length),
-            byte_stride: Some(mem::size_of::<T>() as u32),
+            byte_stride: Some(json::buffer::Stride(mem::size_of::<T>())),
             extensions: Default::default(),
             extras: Default::default(),
             name: None,
@@ -139,7 +139,7 @@ impl BuffersWrapper {
         let idx = json::Index::new((self.buffer_views.len() as u32) - 1);
         self.buffer_map.insert(bytes.clone(), idx);
         self.data.extend(bytes);
-        self.buffer.byte_length = self.data.len() as u32;
+        self.buffer.byte_length = self.data.len().into();
         idx
     }
 
@@ -278,7 +278,7 @@ fn get_vertices_data(
         }
     }
 
-    let num_vertices = positions.len() as u32;
+    let num_vertices = positions.len().into();
     let position_view_idx = buffers.push_buffer(positions.clone());
     let positions = json::Accessor {
         buffer_view: Some(position_view_idx),
@@ -356,7 +356,7 @@ fn get_indices_data(
     let Some(mesh_indices) = indices else {
         return None;
     };
-    let count = mesh_indices.len() as u32;
+    let count = mesh_indices.len().into();
     let indices = mesh_indices.iter().map(|idx| idx as u32).collect();
     let view_idx = buffers.push_buffer(indices);
     // TODO(luca) Indexes can also be u8 / u16
