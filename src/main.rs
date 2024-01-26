@@ -119,17 +119,17 @@ fn export_test_mesh() -> Result<Vec<u8>, MeshExportError> {
     let (mesh2, material2) = create_bevy_sample_mesh2();
     let data1 = MeshData {
         mesh: &mesh,
-        material: &material,
+        material: Some(&material),
         pose: None,
     };
     let data2 = MeshData {
         mesh: &mesh2,
-        material: &material2,
+        material: Some(&material2),
         pose: None,
     };
     let data3 = MeshData {
         mesh: &mesh,
-        material: &material2,
+        material: Some(&material2),
         pose: Some(GltfPose {
             translation: [2.0, 2.0, 2.0],
             ..Default::default()

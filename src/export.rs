@@ -295,13 +295,12 @@ fn to_padded_byte_vector<T>(vec: Vec<T>) -> Vec<u8> {
 
 fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     buffers: &mut BuffersWrapper,
-    mat: &StandardMaterial,
+    mat: Option<&StandardMaterial>,
     image_getter: &F,
-    skip: bool,
 ) -> Result<Option<json::Material>, MeshExportError> {
-    if skip {
+    let Some(mat) = mat else {
         return Ok(None);
-    }
+    };
     let mut material = json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
             base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
@@ -464,7 +463,7 @@ fn get_indices_data(
 #[derive(Clone, Debug)]
 pub struct MeshData<'a> {
     pub mesh: &'a Mesh,
-    pub material: &'a StandardMaterial,
+    pub material: Option<&'a StandardMaterial>,
     pub pose: Option<GltfPose>,
 }
 
@@ -498,7 +497,6 @@ pub fn export_meshes<
             &mut buffers,
             data.material,
             &image_getter,
-            options.skip_materials,
         )?;
 
         let mut primitive = json::mesh::Primitive {
