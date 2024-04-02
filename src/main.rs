@@ -4,8 +4,9 @@ use bevy_render::mesh::Indices;
 use bevy_render::prelude::*;
 use bevy_render::render_resource::PrimitiveTopology;
 use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy_transform::prelude::Transform;
 
-use bevy_gltf_export::{export_meshes, CompressGltfOptions, GltfPose, MeshData, MeshExportError};
+use bevy_gltf_export::{export_meshes, CompressGltfOptions, MeshData, MeshExportError};
 
 fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
     // Create a new mesh using a triangle list topology, where each set of 3 vertices composes a triangle.
@@ -120,18 +121,18 @@ fn export_test_mesh() -> Result<Vec<u8>, MeshExportError> {
     let data1 = MeshData {
         mesh: &mesh,
         material: Some(&material),
-        pose: None,
+        transform: None,
     };
     let data2 = MeshData {
         mesh: &mesh2,
         material: Some(&material2),
-        pose: None,
+        transform: None,
     };
     let data3 = MeshData {
         mesh: &mesh,
         material: Some(&material2),
-        pose: Some(GltfPose {
-            translation: [2.0, 2.0, 2.0],
+        transform: Some(Transform {
+            translation: [2.0, 2.0, 2.0].into(),
             ..Default::default()
         }),
     };

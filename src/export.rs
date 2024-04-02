@@ -1,6 +1,7 @@
 use bevy_asset::Handle;
 use bevy_pbr::StandardMaterial;
 use bevy_render::prelude::*;
+use bevy_transform::prelude::Transform;
 use gltf_json as json;
 
 use std::collections::{BTreeMap, HashMap};
@@ -69,25 +70,6 @@ pub enum MeshExportError {
     SerializationError,
     #[error("Failed converting index to u32 {0}")]
     U32CastError(std::num::TryFromIntError),
-}
-
-/// Used as a parameter for external facing functions
-#[derive(Debug, Clone)]
-pub struct GltfPose {
-    pub translation: [f32; 3],
-    // Unit quaternion
-    pub rotation: [f32; 4],
-    pub scale: Option<[f32; 3]>,
-}
-
-impl Default for GltfPose {
-    fn default() -> Self {
-        Self {
-            translation: Default::default(),
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: None,
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -198,7 +180,7 @@ impl BuffersWrapper {
     fn push_image(&mut self, image: Image) -> Result<json::Index<json::Texture>, MeshExportError> {
         let image_size = image.size();
         let image_buffer: image::ImageBuffer<image::Rgba<_>, _> =
-            image::ImageBuffer::from_raw(image_size[0] as u32, image_size[1] as u32, image.data)
+            image::ImageBuffer::from_raw(image_size[0], image_size[1], image.data)
                 .ok_or(MeshExportError::ImageConversionFailed)?;
         let mut bytes: Vec<u8> = Vec::new();
         image_buffer
@@ -464,7 +446,7 @@ fn get_indices_data(
 pub struct MeshData<'a> {
     pub mesh: &'a Mesh,
     pub material: Option<&'a StandardMaterial>,
-    pub pose: Option<GltfPose>,
+    pub transform: Option<Transform>,
 }
 
 pub fn export_meshes<
@@ -493,11 +475,7 @@ pub fn export_meshes<
 
         let vertices_data = get_vertices_data(&mut buffers, data.mesh)?;
 
-        let material = to_gltf_material(
-            &mut buffers,
-            data.material,
-            &image_getter,
-        )?;
+        let material = to_gltf_material(&mut buffers, data.material, &image_getter)?;
 
         let mut primitive = json::mesh::Primitive {
             attributes: {
@@ -566,11 +544,11 @@ pub fn export_meshes<
             )),
             name: None,
             rotation: data
-                .pose
+                .transform
                 .as_ref()
-                .map(|p| json::scene::UnitQuaternion(p.rotation)),
-            scale: data.pose.as_ref().and_then(|p| p.scale),
-            translation: data.pose.map(|p| p.translation),
+                .map(|p| json::scene::UnitQuaternion(p.rotation.into())),
+            scale: data.transform.as_ref().map(|p| p.scale.into()),
+            translation: data.transform.map(|p| p.translation.into()),
             skin: None,
             weights: None,
         };
