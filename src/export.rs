@@ -1,4 +1,5 @@
 use bevy_asset::Handle;
+use bevy_color::ColorToComponents;
 use bevy_pbr::StandardMaterial;
 use bevy_render::prelude::*;
 use bevy_transform::prelude::Transform;
@@ -186,7 +187,7 @@ impl BuffersWrapper {
         image_buffer
             .write_to(
                 &mut std::io::Cursor::new(&mut bytes),
-                image::ImageOutputFormat::Png,
+                image::ImageFormat::Png,
             )
             .or(Err(MeshExportError::ImageConversionFailed))?;
 
@@ -285,7 +286,9 @@ fn to_gltf_material<F: Fn(&Handle<Image>) -> Option<Image>>(
     };
     let mut material = json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
-            base_color_factor: json::material::PbrBaseColorFactor(mat.base_color.as_rgba_f32()),
+            base_color_factor: json::material::PbrBaseColorFactor(
+                mat.base_color.to_srgba().to_f32_array(),
+            ),
             metallic_factor: json::material::StrengthFactor(mat.metallic),
             roughness_factor: json::material::StrengthFactor(mat.perceptual_roughness),
             // TODO(luca) other properties here
