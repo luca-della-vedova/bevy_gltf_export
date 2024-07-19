@@ -2,15 +2,15 @@ use bevy_asset::Handle;
 use bevy_pbr::StandardMaterial;
 use bevy_render::mesh::Indices;
 use bevy_render::prelude::*;
-use bevy_render::render_resource::PrimitiveTopology;
-use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy_render::render_resource::{PrimitiveTopology, Extent3d, TextureDimension, TextureFormat};
+use bevy_render::render_asset::RenderAssetUsages;
 use bevy_transform::prelude::Transform;
 
 use bevy_gltf_export::{export_meshes, CompressGltfOptions, MeshData, MeshExportError};
 
 fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
     // Create a new mesh using a triangle list topology, where each set of 3 vertices composes a triangle.
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     // Add 4 vertices, each with its own position attribute (coordinate in
     // 3D space), for each of the corners of the parallelogram.
     mesh.insert_attribute(
@@ -39,11 +39,11 @@ fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
     );
     // After defining all the vertices and their attributes, build each triangle using the
     // indices of the vertices that make it up in a counter-clockwise order.
-    mesh.set_indices(Some(Indices::U32(vec![
+    mesh.insert_indices(Indices::U32(vec![
         // First triangle
         0, 3, 1, // Second triangle
         1, 3, 2,
-    ])));
+    ]));
     (
         mesh,
         StandardMaterial {
@@ -56,7 +56,7 @@ fn create_bevy_sample_mesh() -> (Mesh, StandardMaterial) {
 
 fn create_bevy_sample_mesh2() -> (Mesh, StandardMaterial) {
     // Create a new mesh using a triangle list topology, where each set of 3 vertices composes a triangle.
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     // Add 4 vertices, each with its own position attribute (coordinate in
     // 3D space), for each of the corners of the parallelogram.
     mesh.insert_attribute(
@@ -85,11 +85,11 @@ fn create_bevy_sample_mesh2() -> (Mesh, StandardMaterial) {
     );
     // After defining all the vertices and their attributes, build each triangle using the
     // indices of the vertices that make it up in a counter-clockwise order.
-    mesh.set_indices(Some(Indices::U32(vec![
+    mesh.insert_indices(Indices::U32(vec![
         // First triangle
         0, 3, 1, // Second triangle
         1, 3, 2,
-    ])));
+    ]));
     (
         mesh,
         StandardMaterial {
@@ -112,6 +112,7 @@ fn sample_image_getter(_id: &Handle<Image>) -> Option<Image> {
         TextureDimension::D2,
         &[0, 0, 255, 255],
         TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
     ))
 }
 
